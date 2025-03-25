@@ -1,0 +1,116 @@
+package main
+
+import (
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+
+	_ "github.com/lib/pq"
+	"github.com/gorilla/mux"
+)
+
+type Song struct {
+	ID     int    `json:"id"`
+	Group  string `json:"group"`
+	Title  string `json:"song"`
+	Text   string `json:"text"`
+	Link   string `json:"link"`
+	Date   string `json:"releaseDate"`
+}
+
+var db *sql.DB
+
+func main() {
+	var err error
+	db, err = sql.Open("postgres", os.Getenv("DB_CONN"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	r := mux.NewRouter()
+	r.HandleFunc("/songs", getSongs).Methods("GET")
+	r.HandleFunc("/songs", addSong).Methods("POST")
+	r.HandleFunc("/songs/{id}", getSongText).Methods("GET")
+	r.HandleFunc("/songs/{id}", updateSong).Methods("PUT")
+	r.HandleFunc("/songs/{id}", deleteSong).Methods("DELETE")
+
+	log.Println("Server is running on port 8080")
+	http.ListenAndServe(":8080", r)
+}
+
+func getSongs(w http.ResponseWriter, r *http.Request) {
+	rows, err := db.Query("SELECT id, group, song, text, link, releaseDate FROM songs")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var songs []Song
+	for rows.Next() {
+		var song Song
+		if err := rows.Scan(&song.ID, &song.Group, &song.Title, &song.Text, &song.Link, &song.Date); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		songs = append(songs, song)
+	}
+	json.NewEncoder(w).Encode(songs)
+}
+
+func addSong(w http.ResponseWriter, r *http.Request) {
+	var song Song
+	if err := json.NewDecoder(r.Body).Decode(&song); err != nil {
+		http.Error(w, "Invalid input", http.StatusBadRequest)
+		return
+	}
+
+	query := "INSERT INTO songs (group, song, text, link, releaseDate) VALUES ($1, $2, $3, $4, $5) RETURNING id"
+	err := db.QueryRow(query, song.Group, song.Title, song.Text, song.Link, song.Date).Scan(&song.ID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(song)
+}
+
+func getSongText(w http.ResponseWriter, r *http.Request) {
+	params := mux.Vars(r)
+	var text string
+	err := db.QueryRow("SELECT text FROM songs WHERE id = $1", params["id"]).Scan(&text)
+	if err != nil {
+		http.Error(w, "Song not found", http.StatusNotFound)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]string{"text": text})
+}
+
+func updateSong(w http.ResponseWriter, r *http.Request) {
+	params := mux.Vars(r)
+	var song Song
+	if err := json.NewDecoder(r.Body).Decode(&song); err != nil {
+		http.Error(w, "Invalid input", http.StatusBadRequest)
+		return
+	}
+	query := "UPDATE songs SET group = $1, song = $2, text = $3, link = $4, releaseDate = $5 WHERE id = $6"
+	_, err := db.Exec(query, song.Group, song.Title, song.Text, song.Link, song.Date, params["id"])
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(song)
+}
+
+func deleteSong(w http.ResponseWriter, r *http.Request) {
+	params := mux.Vars(r)
+	_, err := db.Exec("DELETE FROM songs WHERE id = $1", params["id"])
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]string{"message": "Song deleted"})
+}
